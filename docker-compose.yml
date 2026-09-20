@@ -1,0 +1,39 @@
+# Local Phase 0 dev environment.
+#   docker compose up -d          -> Postgres 16 on host port 5433
+#   docker compose up api         -> FastAPI on :8000 (AUTH_MODE=dev)
+# Then: cd api && alembic upgrade head
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: mp
+      POSTGRES_PASSWORD: mp
+      POSTGRES_DB: marketpilot
+    ports:
+      - "5433:5432"
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mp -d marketpilot"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    volumes:
+    - .:/app
+    environment:
+      MP_APP_ENV: dev
+      MP_AUTH_MODE: dev
+      MP_DATABASE_URL: postgresql+asyncpg://mp:mp@db:5432/marketpilot
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  dbdata:

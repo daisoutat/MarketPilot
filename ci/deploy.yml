@@ -1,0 +1,101 @@
+# Self-updating deploy: push to `main` -> build -> ECR -> rolling deploy.
+# First run: create `marketpilot/api` repo + ECS service via CDK, then set the
+# secrets below. Uses OIDC (no long-lived access keys).
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  IMAGE: ${{ secrets.AWS_ACCOUNT }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/marketpilot/api
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test deps
+        run: pip install -r api/requirements-dev.txt
+      - name: Compile check (api + common + workers)
+        run: python -m compileall -q api common workers tests infra || exit 1
+      - name: Run tests
+        run: python -m pytest -q
+      - name: Build Lambda layer
+        run: bash ci/build-layer.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install web deps
+        working-directory: web
+        run: npm ci
+      - name: Build web (typecheck + bundle)
+        working-directory: web
+        run: npm run build
+
+  deploy:
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & push image
+        run: |
+          docker build -t "$IMAGE:latest" -t "$IMAGE:${{ github.sha }}" ./api
+          docker push "$IMAGE:latest"
+          docker push "$IMAGE:${{ github.sha }}"
+
+      - name: Migrate database
+        run: |
+          # Run Alembic as a one-off ECS task (image tagged with this SHA).
+          MIGRATION_TASK=$(aws ecs run-task \
+            --cluster marketpilot \
+            --task-definition marketpilot-api \
+            --overrides '{"containerOverrides":[{"name":"marketpilot-api","command":["alembic","upgrade","head"]}]}' \
+            --launch-type FARGATE \
+            --network-configuration '{"awsvpcConfiguration":{"subnets":[],"assignPublicIp":"DISABLED"}}' \
+            --query 'tasks[0].taskArn' --output text)
+          aws ecs wait tasks-stopped --cluster marketpilot --tasks "$MIGRATION_TASK"
+
+      - name: Rolling deploy (with rollback)
+        run: |
+          # Capture the live task definition *before* touching the service so a
+          # failed rollout can be reverted to it.
+          BEFORE_TD=$(aws ecs describe-services --cluster marketpilot \
+            --services marketpilot-web \
+            --query 'services[0].taskDefinition' --output text)
+          echo "current task definition: $BEFORE_TD"
+
+          set +e
+          aws ecs update-service --cluster marketpilot \
+            --service marketpilot-web --force-new-deployment
+          aws ecs wait services-stable --cluster marketpilot --services marketpilot-web
+          DEPLOY_RC=$?
+          set -e
+
+          if [ $DEPLOY_RC -ne 0 ]; then
+            echo "deploy failed -> rolling back to $BEFORE_TD"
+            aws ecs update-service --cluster marketpilot \
+              --service marketpilot-web --task-definition "$BEFORE_TD" --force-new-deployment
+            aws ecs wait services-stable --cluster marketpilot --services marketpilot-web
+            exit $DEPLOY_RC
+          fi

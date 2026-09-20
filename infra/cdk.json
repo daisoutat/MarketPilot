@@ -1,0 +1,11 @@
+{
+  "app": "python app.py",
+  "context": {
+    "region": "us-east-1",
+    "account": "",
+    "enable-nat": true,
+    "self-destruct": false
+  },
+  "requireApproval": "never",
+  "outputsFile": "cdk.outputs.json"
+}

@@ -1,0 +1,5 @@
+# Test commands for the API + shared package: pip install -r requirements-dev.txt ; pytest
+pytest>=8.3
+pytest-asyncio>=0.24
+aiosqlite>=0.20
+greenlet>=3.1

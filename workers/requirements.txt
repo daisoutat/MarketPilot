@@ -1,0 +1,10 @@
+# Worker Lambda runtime dependencies (installed into the layer by
+# ci/build-layer.sh). Keep aligned with common/ imports used by funcs/*.
+boto3>=1.35,<2
+sqlalchemy[asyncio]>=2.0.36,<2.1
+asyncpg>=0.30,<0.31
+greenlet>=3.1
+pydantic>=2.10,<3
+pydantic-settings>=2.7,<3
+httpx>=0.28,<0.29
+cryptography>=43,<44
